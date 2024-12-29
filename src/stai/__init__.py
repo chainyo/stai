@@ -1,6 +1,7 @@
 """Entrypoint for the Silicon-Transcription AI CLI."""
 
 import os
+import subprocess
 from enum import Enum
 from pathlib import Path
 
@@ -55,7 +56,23 @@ def transcribe(
     else:
         audio_path = file_path
 
-    os.system(f"{PREFIX_WHISPER_CPP_CLI} -m {WHISPER_CPP_PATH}/models/ggml-{model}.bin -f {audio_path}")
+    result = subprocess.run(
+        f"{PREFIX_WHISPER_CPP_CLI} -m {WHISPER_CPP_PATH}/models/ggml-{model}.bin -f {audio_path}",
+        capture_output=True,
+        text=True,
+        shell=True,
+    )
+
+    transcription_lines: list[str] = []
+    for line in result.stdout.split("\n"):
+        if line.startswith("[") and "-->" in line:
+            transcription_lines.append(line.split("]")[-1].strip())
+
+    transcription = "\n".join(transcription_lines)
+    with open(f"{audio_path}.txt", "w") as f:
+        f.write(transcription)
+
+    typer.echo(f"Transcription saved to {audio_path}.txt")
 
 
 @app.command()
@@ -66,7 +83,19 @@ def download_model(model: str) -> None:
         typer.echo(f"Model not found. Available models: {models}", err=True)
         return
 
-    os.system(f"sh {WHISPER_CPP_PATH}/models/download-ggml-model.sh {model}")
+    download_script = f"{WHISPER_CPP_PATH}/models/download-ggml-model.sh"
+    try:
+        result = subprocess.run([download_script, model], check=True)
+        if result.returncode == 0:
+            # If download successful, run the coreml preparation command
+            typer.echo(f"Successfully downloaded {model}, preparing CoreML model...")
+            coreml_result = subprocess.run([f"{WHISPER_CPP_PATH}/models/generate-coreml-model.sh {model}"], check=True)
+            if coreml_result.returncode == 0:
+                typer.echo("CoreML model preparation completed successfully")
+            else:
+                typer.echo("CoreML model preparation failed", err=True)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"Command failed with return code {e.returncode}", err=True)
 
 
 @app.command()
@@ -110,7 +139,16 @@ def _download_file_from_youtube(url: str, filename: str) -> str:
     with YoutubeDL(
         {
             "format": "bestaudio",
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "wav",
+                }
+            ],
+            "postprocessor_args": [
+                "-ar", "16000",
+                "-ac", "1",
+            ],
             "outtmpl": f"{filename}",
             "quiet": True,
         }
